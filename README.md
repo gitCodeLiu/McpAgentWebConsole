@@ -41,6 +41,8 @@ http://127.0.0.1:8765/
 
 ## Docker
 
+Docker 镜像会运行同一个本地 Node HTTP server：前端静态文件、`/api/mcp-proxy`、`/api/mcp-stdio` 和 demo MCP 都由容器里的 `node server.mjs` 提供。
+
 构建镜像：
 
 ```bash
@@ -57,6 +59,20 @@ docker run --rm -p 8765:8765 mcp-agent-web-console
 
 ```text
 http://127.0.0.1:8765/
+```
+
+Docker 场景下的本地 stdio 边界：
+
+- `本地 stdio` 会在容器内启动命令，不会直接启动宿主机上的命令。
+- 如果要调试宿主机项目里的 stdio MCP，需要把对应目录挂载进容器，并在页面里填写容器内路径。
+- 如果要直接调试宿主机已有命令或绝对路径，推荐使用本机 `npm run serve`，不要通过 Docker 间接访问。
+
+示例：把当前项目挂载到容器内 `/workspace`，页面里的 `Working Directory` 可填写 `/workspace`。
+
+```bash
+docker run --rm -p 8765:8765 \
+  -v "$PWD:/workspace" \
+  mcp-agent-web-console
 ```
 
 ## 开发
