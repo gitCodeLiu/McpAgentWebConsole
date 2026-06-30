@@ -24,20 +24,20 @@ const standardMcpMethods = [
   {method: 'notifications/progress', kind: 'notification', direction: 'bidirectional', category: 'base', description: '长任务进度通知。'},
   {method: 'logging/setLevel', kind: 'request', direction: 'client_to_server', category: 'logging', description: '客户端设置服务端日志级别。'},
   {method: 'notifications/message', kind: 'notification', direction: 'server_to_client', category: 'logging', description: '服务端向客户端发送日志消息。'},
-  {method: 'tools/list', kind: 'request', direction: 'client_to_server', category: 'tools', description: '列出服务端提供的工具。'},
-  {method: 'tools/call', kind: 'request', direction: 'client_to_server', category: 'tools', description: '调用服务端提供的工具。'},
-  {method: 'notifications/tools/list_changed', kind: 'notification', direction: 'server_to_client', category: 'tools', description: '服务端通知工具列表变化。'},
-  {method: 'resources/list', kind: 'request', direction: 'client_to_server', category: 'resources', description: '列出服务端资源。'},
-  {method: 'resources/read', kind: 'request', direction: 'client_to_server', category: 'resources', description: '读取指定资源 URI。'},
-  {method: 'resources/templates/list', kind: 'request', direction: 'client_to_server', category: 'resources', description: '列出服务端资源模板。'},
+  {method: 'tools/list', kind: 'request', direction: 'client_to_server', category: 'tools', description: '列出 Server 暴露的 Tools。'},
+  {method: 'tools/call', kind: 'request', direction: 'client_to_server', category: 'tools', description: '调用 Server 暴露的 Tool。'},
+  {method: 'notifications/tools/list_changed', kind: 'notification', direction: 'server_to_client', category: 'tools', description: 'Server 通知 Tools 列表变化。'},
+  {method: 'resources/list', kind: 'request', direction: 'client_to_server', category: 'resources', description: '列出 Server 暴露的 Resources。'},
+  {method: 'resources/read', kind: 'request', direction: 'client_to_server', category: 'resources', description: '读取指定 Resource URI。'},
+  {method: 'resources/templates/list', kind: 'request', direction: 'client_to_server', category: 'resources', description: '列出 Server 暴露的 Resource templates。'},
   {method: 'resources/subscribe', kind: 'request', direction: 'client_to_server', category: 'resources', description: '订阅资源更新通知。'},
   {method: 'resources/unsubscribe', kind: 'request', direction: 'client_to_server', category: 'resources', description: '取消资源更新订阅。'},
   {method: 'notifications/resources/list_changed', kind: 'notification', direction: 'server_to_client', category: 'resources', description: '服务端通知资源列表变化。'},
   {method: 'notifications/resources/updated', kind: 'notification', direction: 'server_to_client', category: 'resources', description: '服务端通知已订阅资源更新。'},
-  {method: 'prompts/list', kind: 'request', direction: 'client_to_server', category: 'prompts', description: '列出服务端 prompt 模板。'},
-  {method: 'prompts/get', kind: 'request', direction: 'client_to_server', category: 'prompts', description: '获取指定 prompt。'},
-  {method: 'notifications/prompts/list_changed', kind: 'notification', direction: 'server_to_client', category: 'prompts', description: '服务端通知 prompt 列表变化。'},
-  {method: 'completion/complete', kind: 'request', direction: 'client_to_server', category: 'completion', description: '请求 prompt/resource template 参数补全。'},
+  {method: 'prompts/list', kind: 'request', direction: 'client_to_server', category: 'prompts', description: '列出 Server 暴露的 Prompts。'},
+  {method: 'prompts/get', kind: 'request', direction: 'client_to_server', category: 'prompts', description: '获取指定 Prompt。'},
+  {method: 'notifications/prompts/list_changed', kind: 'notification', direction: 'server_to_client', category: 'prompts', description: 'Server 通知 Prompts 列表变化。'},
+  {method: 'completion/complete', kind: 'request', direction: 'client_to_server', category: 'completion', description: '请求 Prompt 或 Resource template 参数补全。'},
   {method: 'roots/list', kind: 'request', direction: 'server_to_client', category: 'roots', description: '服务端向客户端请求 roots 列表。'},
   {method: 'notifications/roots/list_changed', kind: 'notification', direction: 'client_to_server', category: 'roots', description: '客户端通知 roots 列表变化。'},
   {method: 'sampling/createMessage', kind: 'request', direction: 'server_to_client', category: 'sampling', description: '服务端请求客户端/模型生成消息。'},
@@ -62,6 +62,7 @@ const mimeTypes = new Map([
 
 const host = readArg('--host') || process.env.MCP_AGENT_WEB_HOST || defaultHost;
 const port = Number(readArg('--port') || process.env.MCP_AGENT_WEB_PORT || defaultPort);
+const allowLanProxy = readFlag('--allow-lan-proxy') || isEnabled(process.env.MCP_AGENT_WEB_ALLOW_LAN_PROXY);
 
 const server = createServer((req, res) => {
   void handleRequest(req, res).catch((error) => {
@@ -71,6 +72,7 @@ const server = createServer((req, res) => {
 
 server.listen(port, host, () => {
   console.log(`MCP Agent HTTP console: http://${host}:${port}`);
+  if (allowLanProxy) console.log('LAN Streamable HTTP MCP proxy: enabled');
 });
 
 async function handleRequest(req, res) {
@@ -253,8 +255,8 @@ function stdioSessionKey({command, args, cwd}) {
 
 async function handleMcpProxy(req, res) {
   try {
-    if (!isLoopbackHost(remoteAddress(req))) {
-      throw new HttpError(400, 'BAD_REQUEST', '本地代理只接受来自本机的请求；请通过 127.0.0.1 或 localhost 使用');
+    if (!isProxyClientAllowed(req)) {
+      throw new HttpError(400, 'BAD_REQUEST', '本地代理只接受来自本机的请求；如需局域网共享，请用 --allow-lan-proxy 启动并从同源页面访问');
     }
     const body = await readJsonBody(req);
     const targetUrl = String(body.targetUrl || '').trim();
@@ -305,8 +307,8 @@ async function handleMcpProxy(req, res) {
 
 async function handleMcpProxyTerminate(req, res) {
   try {
-    if (!isLoopbackHost(remoteAddress(req))) {
-      throw new HttpError(400, 'BAD_REQUEST', '本地代理只接受来自本机的请求；请通过 127.0.0.1 或 localhost 使用');
+    if (!isProxyClientAllowed(req)) {
+      throw new HttpError(400, 'BAD_REQUEST', '本地代理只接受来自本机的请求；如需局域网共享，请用 --allow-lan-proxy 启动并从同源页面访问');
     }
     const body = await readJsonBody(req);
     const targetUrl = String(body.targetUrl || '').trim();
@@ -615,6 +617,12 @@ function isSameOriginRequest(req) {
   }
 }
 
+function isProxyClientAllowed(req) {
+  if (isLoopbackHost(remoteAddress(req))) return true;
+  if (!allowLanProxy) return false;
+  return isSameOriginRequest(req);
+}
+
 function effectivePort(url) {
   if (url.port) return url.port;
   return url.protocol === 'https:' ? '443' : '80';
@@ -637,6 +645,14 @@ function isInsidePath(root, candidate) {
 function readArg(name) {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : '';
+}
+
+function readFlag(name) {
+  return process.argv.includes(name);
+}
+
+function isEnabled(value) {
+  return ['1', 'true', 'yes', 'on'].includes(String(value || '').trim().toLowerCase());
 }
 
 function headerTitleCase(value) {

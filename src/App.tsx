@@ -68,7 +68,13 @@ type McpResponse = {
   error?: {message?: string; code?: number | string} | string;
 };
 
-type TabName = 'protocol' | 'tools';
+type TabName = 'protocol' | 'tools' | 'resources' | 'prompts' | 'completion' | 'logging';
+type CapabilityTab = {
+  key: TabName;
+  label: string;
+  title: string;
+  count?: number;
+};
 type Mode = 'form' | 'json';
 type ToolParam = {
   name: string;
@@ -85,6 +91,39 @@ const STORAGE_KEY = 'mcpAgentConsoleConfig';
 const SAVED_CONFIGS_KEY = 'mcpAgentConsoleSavedConfigs';
 const ACTIVE_PROFILE_KEY = 'mcpAgentConsoleActiveProfileId';
 const DEFAULT_PROTOCOL_VERSION = '2025-11-25';
+const MCP_SERVER_CONFIG_PLACEHOLDER = `{
+  "type": "streamable-http",
+  "url": "https://mcp.example.com/mcp",
+  "headers": {
+    "Authorization": "Bearer ..."
+  }
+}
+
+或
+
+{
+  "command": "node",
+  "args": [
+    "server.js",
+    "--stdio"
+  ]
+}`;
+const STDIO_ARGS_PLACEHOLDER = `[
+  "server.js",
+  "--stdio"
+]`;
+const HEADERS_JSON_PLACEHOLDER = `{
+  "Authorization": "Bearer ..."
+}`;
+const DEFAULT_ARGS_JSON_PLACEHOLDER = `{
+  "requester": "codex"
+}`;
+const ARRAY_VALUE_PLACEHOLDER = `[
+  "value"
+]`;
+const OBJECT_VALUE_PLACEHOLDER = `{
+  "key": "value"
+}`;
 const DEMO_LOCAL_PRESET = {
   transport: 'proxy' as const,
   baseUrl: apiUrl('/api/mcp-proxy'),
@@ -127,9 +166,9 @@ const CATEGORY_ORDER = ['lifecycle', 'base', 'tools', 'resources', 'prompts', 'c
 const LIFECYCLE_STEPS: {key: LifecycleStep; label: string; description: string}[] = [
   {key: 'initialize', label: 'initialize', description: '协商协议版本与能力'},
   {key: 'initialized', label: 'initialized', description: '发送初始化完成通知'},
-  {key: 'toolsList', label: 'tools/list', description: '按 capabilities 发现工具'},
-  {key: 'ready', label: 'enabled', description: '当前配置已开启，可发起调试调用'},
-  {key: 'terminated', label: 'closed', description: '当前配置已关闭，session 或 stdio 进程已清理'}
+  {key: 'toolsList', label: 'tools/list', description: '按 server capabilities 发现 Tools'},
+  {key: 'ready', label: 'operation', description: '进入 operation phase，可发起调试调用'},
+  {key: 'terminated', label: 'shutdown', description: '底层 transport 已关闭或 session 已清理'}
 ];
 
 export function App() {
@@ -154,6 +193,7 @@ export function App() {
   const [resultText, setResultText] = useState('{}');
   const [calling, setCalling] = useState(false);
   const [toolsCapability, setToolsCapability] = useState<boolean | null>(null);
+  const [serverCapabilities, setServerCapabilities] = useState<JsonObject>({});
   const [sessionId, setSessionId] = useState('');
   const [negotiatedProtocolVersion, setNegotiatedProtocolVersion] = useState('');
   const [lifecycle, setLifecycle] = useState<LifecycleState>(() => createLifecycleState());
@@ -163,13 +203,21 @@ export function App() {
   const activeConnectionKeyRef = useRef(configProfileId(config));
   const sessionByConnectionRef = useRef<Record<string, ConnectionSessionState>>({});
 
+  const visibleTabs = useMemo(
+    () => capabilityTabs(serverCapabilities, protocolMethods, tools.length, toolsCapability),
+    [protocolMethods, serverCapabilities, tools.length, toolsCapability]
+  );
+  const activeProtocolMethods = useMemo(
+    () => protocolMethodsForTab(protocolMethods, activeTab),
+    [activeTab, protocolMethods]
+  );
   const filteredProtocols = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return protocolMethods.filter((item) => {
-      if (!q || activeTab !== 'protocol') return true;
+    return activeProtocolMethods.filter((item) => {
+      if (!q || activeTab === 'tools') return true;
       return [item.method, item.category, item.direction, item.description].join(' ').toLowerCase().includes(q);
     });
-  }, [activeTab, protocolMethods, search]);
+  }, [activeProtocolMethods, activeTab, search]);
 
   const filteredTools = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -182,11 +230,11 @@ export function App() {
   const currentProtocol = selectedProtocol
     ? protocolMethods.find((item) => item.method === selectedProtocol.method) ?? selectedProtocol
     : null;
-  const selectedName = activeTab === 'protocol' ? currentProtocol?.method : selectedTool?.name;
-  const selectedDesc = activeTab === 'protocol'
+  const selectedName = activeTab === 'tools' ? selectedTool?.name : currentProtocol?.method;
+  const selectedDesc = activeTab !== 'tools'
     ? currentProtocol
       ? `${protocolStatusText(currentProtocol)} · ${CATEGORY_NAMES[currentProtocol.category] || currentProtocol.category} · ${currentProtocol.description}`
-      : '选择一个协议接口'
+      : '选择一个协议方法'
     : firstLine(selectedTool?.description || selectedTool?.title || '');
   const canCall = !calling && (activeTab === 'tools' ? Boolean(selectedTool) : Boolean(currentProtocol?.clientCallable));
   const activeProfile = savedConfigs.find((profile) => profile.id === activeProfileId);
@@ -199,14 +247,23 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (!visibleTabs.some((tab) => tab.key === activeTab)) {
+      setActiveTab('protocol');
+    }
+  }, [activeTab, visibleTabs]);
+
+  useEffect(() => {
     if (activeTab === 'protocol') {
       const next = selectedProtocol ?? protocolMethods[0] ?? null;
       if (next) selectProtocol(next);
-    } else {
+    } else if (activeTab === 'tools') {
       const next = selectedTool ?? tools[0] ?? null;
       if (next) selectTool(next);
+    } else {
+      const next = activeProtocolMethods.find((item) => item.method === selectedProtocol?.method) ?? activeProtocolMethods[0] ?? null;
+      if (next) selectProtocol(next);
     }
-  }, [activeTab]);
+  }, [activeTab, activeProtocolMethods]);
 
   async function initializePage() {
     const methods = await loadProtocolMethods();
@@ -257,6 +314,7 @@ export function App() {
       setLifecycleStep('initialize', 'done');
       const result = objectValue(initResult.result);
       const capabilities = objectValue(result.capabilities);
+      setServerCapabilities(capabilities);
       setToolsCapability(Boolean(capabilities.tools));
       const negotiatedVersion = typeof result.protocolVersion === 'string' ? result.protocolVersion : requestConfig.protocolVersion;
       const activeConfig = {...requestConfig, protocolVersion: negotiatedVersion};
@@ -270,11 +328,12 @@ export function App() {
       let nextTools: ToolSchema[] = [];
       if (capabilities.tools) {
         setLifecycleStep('toolsList', 'running');
-        nextTools = await loadTools(activeConfig, connectionKey);
+        nextTools = await loadTools(activeConfig, connectionKey, {activate: markReady});
         setLifecycleStep('toolsList', 'done');
       } else {
         setLifecycleStep('toolsList', 'skipped');
       }
+      const autoActivatedTools = markReady && nextTools.length > 0;
       if (!capabilities.tools) {
         setTools([]);
         setSelectedTool(null);
@@ -282,7 +341,7 @@ export function App() {
       const nextProtocol = selectedProtocol ? nextMethods.find((item) => item.method === selectedProtocol.method) ?? nextMethods[0] : nextMethods[0];
       if (nextProtocol) {
         setSelectedProtocol(nextProtocol);
-        if (activeTab === 'protocol') setArgs(protocolPayload(nextProtocol.method, activeConfig, selectedTool));
+        if (activeTab === 'protocol' && !autoActivatedTools) setArgs(protocolPayload(nextProtocol.method, activeConfig, selectedTool));
       }
       const serverInfo = objectValue(result.serverInfo);
       const serverName = typeof serverInfo.name === 'string' ? ` · ${serverInfo.name}` : '';
@@ -298,6 +357,7 @@ export function App() {
     } catch (error) {
       setLifecycle((current) => markLifecycleError(current));
       applyServerCapabilities(methods, {}, false);
+      setServerCapabilities({});
       setTools([]);
       setSelectedTool(null);
       setToolsCapability(null);
@@ -312,14 +372,20 @@ export function App() {
     setLifecycle((current) => ({...current, [step]: status}));
   }
 
-  async function loadTools(requestConfig = config, connectionKey = activeConnectionKeyRef.current || configProfileId(requestConfig)) {
+  async function loadTools(requestConfig = config, connectionKey = activeConnectionKeyRef.current || configProfileId(requestConfig), {activate = false}: {activate?: boolean} = {}) {
     const data = await mcpRequest({jsonrpc: '2.0', id: Date.now(), method: 'tools/list', params: {}}, requestConfig, connectionKey);
     const result = objectValue(data.result);
     const nextTools = Array.isArray(result.tools) ? result.tools as ToolSchema[] : [];
     setTools(nextTools);
     const nextSelected = selectedTool ? nextTools.find((tool) => tool.name === selectedTool.name) ?? nextTools[0] : nextTools[0];
     setSelectedTool(nextSelected ?? null);
-    if (activeTab === 'tools' && nextSelected) setArgs(buildDefaultArguments(nextSelected, requestConfig.defaultArgs));
+    if (nextSelected && (activeTab === 'tools' || activate)) {
+      setArgs(buildDefaultArguments(nextSelected, requestConfig.defaultArgs));
+    }
+    if (activate && nextSelected) {
+      setSearch('');
+      setActiveTab('tools');
+    }
     return nextTools;
   }
 
@@ -471,6 +537,7 @@ export function App() {
     setSessionId('');
     setNegotiatedProtocolVersion('');
     applyServerCapabilities(baseProtocolMethods, {}, false);
+    setServerCapabilities({});
     setTools([]);
     setSelectedTool(null);
     setToolsCapability(null);
@@ -507,7 +574,7 @@ export function App() {
     } else {
       setConfigSaved(savedConfigs.some((profile) => profile.id === nextId));
     }
-    if (activeTab === 'protocol' && currentProtocol) setArgs(protocolPayload(currentProtocol.method, nextConfig, selectedTool));
+    if (activeTab !== 'tools' && currentProtocol) setArgs(protocolPayload(currentProtocol.method, nextConfig, selectedTool));
     if (activeTab === 'tools' && selectedTool) setArgs(buildDefaultArguments(selectedTool, nextConfig.defaultArgs));
   }
 
@@ -531,6 +598,7 @@ export function App() {
     setTools([]);
     setSelectedTool(null);
     setToolsCapability(null);
+    setServerCapabilities({});
     applyServerCapabilities(baseProtocolMethods, {}, false);
     setLifecycle(createLifecycleStateForProfile(profile.status));
     setHealth({text: configLifecycleLabel(profile.status), kind: profile.status === 'error' ? 'warn' : ''});
@@ -539,6 +607,7 @@ export function App() {
   async function restoreEnabledProfile(profile: SavedConfigProfile, state: ConnectionSessionState) {
     try {
       const capabilities = state.capabilities || {};
+      setServerCapabilities(capabilities);
       applyServerCapabilities(baseProtocolMethods, capabilities, true);
       setToolsCapability(Boolean(capabilities.tools));
       if (capabilities.tools) {
@@ -599,18 +668,18 @@ export function App() {
   async function callSelected() {
     if (!activeConfigEnabled) {
       setResultMeta('当前 MCP 未开启');
-      setResultText('请先在配置管理中选择配置并执行“开启”，再调用协议或工具。');
+      setResultText('请先在配置管理中选择配置并执行“开启”，进入 operation phase 后再调用协议方法或 Tool。');
       return;
     }
     const latestProtocol = selectedProtocol
       ? protocolMethods.find((item) => item.method === selectedProtocol.method) ?? selectedProtocol
       : null;
-    if (activeTab === 'protocol' && !latestProtocol?.clientCallable) {
-      setResultMeta('当前协议接口不可直接调用');
+    if (activeTab !== 'tools' && !latestProtocol?.clientCallable) {
+      setResultMeta('当前协议方法不可由 Client 直接调用');
       setResultText(latestProtocol?.supportSource || '当前连接未声明或该方法不是客户端可发起的方向');
       return;
     }
-    const payload = activeTab === 'protocol' ? args : currentToolCallPayload(selectedTool, args);
+    const payload = activeTab !== 'tools' ? args : currentToolCallPayload(selectedTool, args);
     setCalling(true);
     setResultMeta('调用中');
     setResultText(JSON.stringify(payload, null, 2));
@@ -628,7 +697,7 @@ export function App() {
   }
 
   async function copyPayload() {
-    const payload = activeTab === 'protocol' ? args : currentToolCallPayload(selectedTool, args);
+    const payload = activeTab !== 'tools' ? args : currentToolCallPayload(selectedTool, args);
     await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
     setResultMeta('请求已复制');
   }
@@ -789,6 +858,7 @@ export function App() {
         setSessionId('');
         setNegotiatedProtocolVersion('');
         applyServerCapabilities(baseProtocolMethods, {}, false);
+        setServerCapabilities({});
         setTools([]);
         setSelectedTool(null);
         setToolsCapability(null);
@@ -814,6 +884,7 @@ export function App() {
         setSessionId('');
         setNegotiatedProtocolVersion('');
         applyServerCapabilities(baseProtocolMethods, {}, false);
+        setServerCapabilities({});
         setTools([]);
         setSelectedTool(null);
         setToolsCapability(null);
@@ -844,6 +915,15 @@ export function App() {
     await enableSavedProfile(targetProfile);
   }
 
+  function openConfigPanel() {
+    const enabledProfile = activeProfile?.status === 'enabled'
+      ? activeProfile
+      : savedConfigs.find((profile) => profile.status === 'enabled');
+    const preferredProfile = enabledProfile || activeProfile;
+    if (preferredProfile) setDraftConfig(configToDraft(preferredProfile));
+    setConfigOpen(true);
+  }
+
   async function deleteDraftProfile() {
     try {
       const draftTargetConfig = draftToConfig(draftConfig);
@@ -856,9 +936,14 @@ export function App() {
       persistSavedConfigs(nextProfiles);
       if (targetId === activeProfileId) {
         const fallback = nextProfiles[0];
-        if (fallback) applyConfig(fallback, {persist: true, profileId: fallback.id});
+        if (fallback) selectSavedProfile(fallback);
         else {
           applyConfig(NEW_CONFIG_PRESET, {persist: true});
+          applyServerCapabilities(baseProtocolMethods, {}, false);
+          setServerCapabilities({});
+          setTools([]);
+          setSelectedTool(null);
+          setToolsCapability(null);
           setHealth({text: '未连接', kind: ''});
         }
       }
@@ -878,9 +963,14 @@ export function App() {
       persistSavedConfigs(nextProfiles);
       if (profile.id === activeProfileId) {
         const fallback = nextProfiles[0];
-        if (fallback) applyConfig(fallback, {persist: true, profileId: fallback.id});
+        if (fallback) selectSavedProfile(fallback);
         else {
           applyConfig(NEW_CONFIG_PRESET, {persist: true});
+          applyServerCapabilities(baseProtocolMethods, {}, false);
+          setServerCapabilities({});
+          setTools([]);
+          setSelectedTool(null);
+          setToolsCapability(null);
           setHealth({text: '未连接', kind: ''});
           setLifecycle(createLifecycleState());
         }
@@ -900,35 +990,44 @@ export function App() {
           <div className="brand-lockup">
             <div className="brand-mark" aria-hidden="true"><span /></div>
             <div>
-              <h1>MCP Agent 控制台</h1>
-              <p>以 Agent 视角接线、握手、调工具</p>
+              <h1>MCP 调试控制台</h1>
+              <p>模拟 MCP Client 连接 Server、协商能力、调用 Tools</p>
             </div>
           </div>
           <button className="icon-btn" type="button" title="查看使用说明" aria-label="查看使用说明" onClick={() => setHelpOpen(true)}>?</button>
         </div>
         <div className="nav-tabs">
-          <button className={`nav-tab ${activeTab === 'protocol' ? 'active' : ''}`} title="查看标准 MCP 协议方法，并按当前服务能力标记可调用项" onClick={() => setActiveTab('protocol')}>协议接口</button>
-          <button className={`nav-tab ${activeTab === 'tools' ? 'active' : ''}`} title="查看当前服务通过 tools/list 暴露的工具" onClick={() => setActiveTab('tools')}>工具接口</button>
+          {visibleTabs.map((tab) => (
+            <button className={`nav-tab ${activeTab === tab.key ? 'active' : ''}`} title={tab.title} key={tab.key} onClick={() => setActiveTab(tab.key)}>
+              <span>{tab.label}</span>
+              {typeof tab.count === 'number' ? <b>{tab.count}</b> : null}
+            </button>
+          ))}
         </div>
         <div className="search">
-          <input value={search} onChange={(event) => setSearch(event.target.value)} type="search" placeholder={activeTab === 'protocol' ? '搜索协议接口' : '搜索工具'} />
+          <input value={search} onChange={(event) => setSearch(event.target.value)} type="search" placeholder={activeTab === 'tools' ? '搜索 Tools' : `搜索 ${tabLabel(activeTab)} 协议方法`} />
           <div className="meta-row">
-            <span>{activeTab === 'protocol' ? `${filteredProtocols.length} / ${protocolMethods.length} 个协议接口` : `${filteredTools.length} / ${tools.length} 个工具`}</span>
+            <span>{activeTab === 'tools' ? `${filteredTools.length} / ${tools.length} 个 Tools` : `${filteredProtocols.length} / ${activeProtocolMethods.length} 个 ${tabLabel(activeTab)} 方法`}</span>
             <span className={`badge ${health.kind}`}>{health.text}</span>
           </div>
           <div className="scope-meter" aria-label="连接摘要">
             <span><b>{tools.length}</b> tools</span>
-            <span><b>{protocolMethods.filter((item) => item.clientCallable).length}</b> callable</span>
+            <span title="客户端可主动发起的 MCP 协议方法数量"><b>{protocolMethods.filter((item) => item.clientCallable).length}</b> protocol calls</span>
           </div>
         </div>
         {activeTab === 'protocol' ? (
           <>
-            <div className="section-title">按 initialize 能力标记</div>
+            <div className="section-title">按 Server Capabilities 标记</div>
+            <ProtocolList methods={filteredProtocols} selected={currentProtocol} onSelect={selectProtocol} />
+          </>
+        ) : activeTab !== 'tools' ? (
+          <>
+            <div className="section-title">{tabLabel(activeTab)} 能力入口</div>
             <ProtocolList methods={filteredProtocols} selected={currentProtocol} onSelect={selectProtocol} />
           </>
         ) : (
           <>
-            <div className="section-title">当前 endpoint 暴露的工具</div>
+            <div className="section-title">当前 Server 暴露的 Tools</div>
             <ToolList tools={filteredTools} totalCount={tools.length} toolsCapability={toolsCapability} selected={selectedTool} onSelect={selectTool} />
           </>
         )}
@@ -937,26 +1036,26 @@ export function App() {
       <main className="main">
         <header className="topbar">
           <div className="topbar-title">
-            <h2>{selectedName || '选择一个接口'}</h2>
-            <p>{selectedDesc || '先配置 endpoint，再连接并调用协议或工具。'}</p>
+            <h2>{selectedName || '选择一个协议方法或 Tool'}</h2>
+            <p>{selectedDesc || '先配置 MCP endpoint，再连接 Server 并调用协议方法或 Tool。'}</p>
           </div>
           <div className="actions">
-            <button className="btn config-management-btn" title="管理保存在当前浏览器 localStorage 的 MCP 配置" onClick={() => setConfigOpen(true)}>配置管理</button>
+            <button className="btn config-management-btn" title="管理保存在当前浏览器 localStorage 的 MCP 配置" onClick={openConfigPanel}>配置管理</button>
           </div>
         </header>
 
-        <section className="connection-strip" aria-label="当前 MCP 连接">
+        <section className="connection-strip" aria-label="当前 MCP Client-Server 连接">
           <div className="wire-node">
             <span className={`wire-light ${health.kind}`} />
             <div>
               <strong>{health.text}</strong>
-              <small>{config.transport === 'stdio' ? '本地 stdio relay' : 'HTTP 代理转发'}</small>
+              <small>{config.transport === 'stdio' ? 'stdio transport relay' : 'Streamable HTTP proxy'}</small>
             </div>
           </div>
           <div className="route-line">
-            <span>client</span>
+            <span>Client</span>
             <code>{effectiveEndpoint(config)}</code>
-            <span>MCP</span>
+            <span>Server</span>
           </div>
           <div className="wire-meta">
             <span>protocol <b>{negotiatedProtocolVersion || config.protocolVersion}</b></span>
@@ -964,14 +1063,14 @@ export function App() {
             <span>config <b>{activeProfile ? configLifecycleLabel(activeProfile.status) : configSaved ? 'local' : 'default'}</b></span>
           </div>
           <div className="connection-controls" aria-label="当前 MCP 操作">
-            <button className="btn" type="button" title="对当前页面接入的 MCP 执行 initialize，并刷新 capabilities/tools" disabled={currentConnectionBusy} onClick={() => void initializeCurrentConnection()}>初始化</button>
+            <button className="btn" type="button" title="对当前 MCP Server 执行 initialize，并刷新 capabilities/tools" disabled={currentConnectionBusy} onClick={() => void initializeCurrentConnection()}>初始化</button>
             <button
               className={`connection-power-switch ${activeConfigEnabled ? 'on' : ''}`}
               type="button"
               role="switch"
               aria-checked={activeConfigEnabled}
               disabled={currentConnectionBusy}
-              title={activeConfigEnabled ? '关闭当前 MCP session 或 stdio 进程' : '开启当前 MCP，完成握手并允许调用'}
+              title={activeConfigEnabled ? '进入 shutdown，关闭当前 session 或 stdio 进程' : '完成初始化并进入 operation phase，允许调用'}
               onClick={() => void toggleCurrentConnection()}
             >
               <span />
@@ -1010,7 +1109,7 @@ export function App() {
                 )}
                 <div className="request-actions">
                   <button className="btn" title="复制当前会发送的 JSON-RPC 请求" onClick={() => void copyPayload()}>复制请求</button>
-                  <button className="btn primary" title={!activeConfigEnabled ? '当前 MCP 配置未开启' : activeTab === 'protocol' && !currentProtocol?.clientCallable ? '当前连接未声明该能力，或该方法不是客户端可发起的方向' : '发送当前 JSON-RPC 请求'} disabled={!canCallSelected} onClick={() => void callSelected()}>{calling ? '调用中' : '调用'}</button>
+                  <button className="btn primary" title={!activeConfigEnabled ? '当前配置未进入 operation phase' : activeTab !== 'tools' && !currentProtocol?.clientCallable ? '当前 Server 未声明该能力，或该方法不是 Client 可主动发起的方向' : '发送当前 JSON-RPC 请求'} disabled={!canCallSelected} onClick={() => void callSelected()}>{calling ? '调用中' : '调用'}</button>
                 </div>
               </div>
             </div>
@@ -1063,7 +1162,7 @@ function ProtocolList({methods, selected, onSelect}: {methods: ProtocolMethod[];
     }))
     .filter((group) => group.items.length);
 
-  if (!methods.length) return <div className="empty">没有匹配的协议接口</div>;
+  if (!methods.length) return <div className="empty">没有匹配的协议方法</div>;
   return (
     <div className="endpoint-list">
       {groups.map((group) => (
@@ -1084,10 +1183,10 @@ function ProtocolList({methods, selected, onSelect}: {methods: ProtocolMethod[];
 }
 
 function ToolList({tools, totalCount, toolsCapability, selected, onSelect}: {tools: ToolSchema[]; totalCount: number; toolsCapability: boolean | null; selected: ToolSchema | null; onSelect: (tool: ToolSchema) => void}) {
-  if (toolsCapability === null) return <div className="empty">连接成功后，如果 server 声明 tools 能力，这里会显示工具列表。</div>;
-  if (!toolsCapability) return <div className="empty">当前 server 未声明 tools 能力，因此没有可调用工具。</div>;
-  if (totalCount === 0) return <div className="empty">当前 server 声明了 tools 能力，但 tools/list 没有返回工具。</div>;
-  if (!tools.length) return <div className="empty">没有匹配的工具，请调整搜索关键词。</div>;
+  if (toolsCapability === null) return <div className="empty">连接成功后，如果 Server 声明 tools capability，这里会显示 Tools 列表。</div>;
+  if (!toolsCapability) return <div className="empty">当前 Server 未声明 tools capability，因此没有可调用 Tool。</div>;
+  if (totalCount === 0) return <div className="empty">当前 Server 声明了 tools capability，但 tools/list 没有返回 Tool。</div>;
+  if (!tools.length) return <div className="empty">没有匹配的 Tool，请调整搜索关键词。</div>;
   return (
     <div className="tool-list">
       {tools.map((tool) => (
@@ -1146,35 +1245,41 @@ function ConfigPanel({
   endpoint: string;
 }) {
   const bodyRef = useRef<HTMLDivElement | null>(null);
+  const listPaneRef = useRef<HTMLDivElement | null>(null);
+  const detailPaneRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
-    if (open) bodyRef.current?.scrollTo({top: 0, left: 0});
+    if (open) scrollConfigPanes();
   }, [open]);
   if (!open) return null;
   const update = (patch: Partial<ConfigDraft>) => setDraft({...draft, ...patch});
   const localStdioAvailable = canUseLocalStdio();
   const canSubmitDraft = draft.transport !== 'stdio' || localStdioAvailable;
-  const scrollToLifecycle = () => window.requestAnimationFrame(() => bodyRef.current?.scrollTo({top: 0, left: 0}));
+  const scrollConfigPanes = () => window.requestAnimationFrame(() => {
+    bodyRef.current?.scrollTo({top: 0, left: 0});
+    listPaneRef.current?.scrollTo({top: 0, left: 0});
+    detailPaneRef.current?.scrollTo({top: 0, left: 0});
+  });
   const newConfig = () => {
     setDraft(configToDraft(NEW_CONFIG_PRESET));
-    scrollToLifecycle();
+    scrollConfigPanes();
   };
   const applyPreset = () => {
     setDraft(configToDraft(DEMO_LOCAL_PRESET));
-    scrollToLifecycle();
+    scrollConfigPanes();
   };
   const applySavedConfig = (profile: SavedConfigProfile) => {
     setDraft(configToDraft(profile));
-    scrollToLifecycle();
+    scrollConfigPanes();
   };
   const draftEndpoint = draft.transport === 'stdio' ? draft.stdioCommand || '未填写本地命令' : draft.targetUrl || endpoint;
-  const draftTransportLabel = draft.transport === 'stdio' ? '本地 stdio' : 'HTTP 代理';
+  const draftTransportLabel = draft.transport === 'stdio' ? 'stdio transport' : 'Streamable HTTP';
   const draftProfile = findDraftSavedProfile(savedConfigs, draft);
   const draftStatus = draftProfile?.status || 'created';
   const importConfig = () => {
     try {
       const parsed = parseMcpServerConfig(draft.importText);
       if (parsed.transport === 'stdio' && !localStdioAvailable) {
-        throw new Error('本地 stdio 只能在本机同源 Web Console 中配置；服务器模式后续开发，敬请期待。');
+        throw new Error('stdio transport 只能在本机同源 Web Console 中配置；服务器模式后续开发。');
       }
       setDraft({...configToDraft(parsed), importText: draft.importText});
     } catch (error) {
@@ -1188,25 +1293,25 @@ function ConfigPanel({
           <div>
             <span className="eyebrow">Connection bay</span>
             <h3>接入配置</h3>
-            <p>选择 endpoint、声明客户端身份，并保存到当前浏览器。</p>
+            <p>选择 transport、填写 MCP Server endpoint 或本地命令，并声明 Client 身份。</p>
           </div>
           <button className="icon-btn" type="button" title="关闭配置" aria-label="关闭配置" onClick={onClose}>x</button>
         </div>
 
         <div className="drawer-body config-manager-body" ref={bodyRef}>
           <section className="config-manager">
-            <div className="config-list-pane">
+            <div className="config-list-pane" ref={listPaneRef}>
               <div className="section-kicker">
                 <span>快速接入</span>
                 <small>保存在当前浏览器</small>
               </div>
               <button className="preset-card new-config-card" type="button" onClick={newConfig}>
                 <b>新建配置</b>
-                <span>创建一条远端 HTTP MCP 配置，保存后出现在快速接入。</span>
+                <span>创建一条 Streamable HTTP MCP Server 配置，保存后出现在快速接入。</span>
               </button>
               <button className="preset-card" type="button" onClick={applyPreset}>
                 <b>本地 Demo MCP</b>
-                <span>使用 /api/mcp 验证握手、工具列表和 JSON 调用流程。</span>
+                <span>使用 /api/mcp 验证初始化、Tools 列表和 JSON-RPC 调用流程。</span>
               </button>
               <div className="saved-profile-list">
                 {savedConfigs.length ? savedConfigs.map((profile) => {
@@ -1269,7 +1374,7 @@ function ConfigPanel({
               </div>
             </div>
 
-            <div className="config-detail-pane">
+            <div className="config-detail-pane" ref={detailPaneRef}>
               <section className="config-section lifecycle-config-section">
                 <div className="section-kicker">
                   <span>配置详情</span>
@@ -1300,7 +1405,7 @@ function ConfigPanel({
               onChange={(value) => update({importText: value, importError: ''})}
               validate={(value) => value.trim() ? parseLooseJsonObject(value) : {}}
               hint="粘贴 Markdown 链接也会自动提取真实 URL。"
-              placeholder='{"type":"streamable-http","url":"https://mcp.example.com/mcp","headers":{"Authorization":"Bearer ..."}} 或 {"command":"node","args":["server.js"]}'
+              placeholder={MCP_SERVER_CONFIG_PLACEHOLDER}
               minRows={6}
               footer={(
                 <>
@@ -1313,15 +1418,15 @@ function ConfigPanel({
 
           <section className="config-section">
             <div className="section-kicker">
-              <span>接入页面</span>
-              <small>{draft.transport === 'stdio' ? '本地命令型 MCP 调试' : '远端 HTTP MCP 调试'}</small>
+              <span>Transport</span>
+              <small>{draft.transport === 'stdio' ? 'stdio transport' : 'Streamable HTTP transport'}</small>
             </div>
-            <div className="config-page-tabs" role="tablist" aria-label="接入页面">
+            <div className="config-page-tabs" role="tablist" aria-label="Transport">
               <button className={draft.transport === 'proxy' ? 'active' : ''} role="tab" aria-selected={draft.transport === 'proxy'} type="button" onClick={() => update({transport: 'proxy'})}>
-                远端 HTTP
+                Streamable HTTP
               </button>
               <button className={draft.transport === 'stdio' ? 'active' : ''} role="tab" aria-selected={draft.transport === 'stdio'} type="button" onClick={() => update({transport: 'stdio'})}>
-                本地 stdio
+                stdio
               </button>
             </div>
             {draft.transport === 'stdio' ? (
@@ -1339,7 +1444,7 @@ function ConfigPanel({
                         onChange={(value) => update({stdioArgsText: value})}
                         validate={(value) => parseJsonArray(value, 'Arguments JSON')}
                         hint="只保存在当前浏览器；命令会由本机 Web Console 后端启动。"
-                        placeholder='["server.js", "--stdio"]'
+                        placeholder={STDIO_ARGS_PLACEHOLDER}
                         minRows={4}
                         compact
                       />
@@ -1351,8 +1456,8 @@ function ConfigPanel({
                   </div>
                 ) : (
                   <div className="local-only-notice">
-                    <b>本地 stdio 只能本机调试</b>
-                    <p>当前页面不是从本机同源 Web Console 打开，因此不能启动浏览器所在电脑上的 stdio MCP。服务器部署场景的 stdio 管理功能后续开发，敬请期待。</p>
+                    <b>stdio transport 只能本机调试</b>
+                    <p>当前页面不是从本机同源 Web Console 打开，因此不能按 stdio transport 启动浏览器所在电脑上的 MCP Server。服务器部署场景的 stdio 管理功能后续开发。</p>
                     <code>请使用 http://127.0.0.1:8765 或 http://localhost:8765 打开本机服务</code>
                   </div>
                 )}
@@ -1360,7 +1465,7 @@ function ConfigPanel({
             ) : (
               <div className="connection-page">
                 <div className="field">
-                  <LabelWithHelp label="远端 MCP 地址" help="本地 Web Console 后端会向这个 HTTP endpoint 转发 JSON-RPC POST 请求。" />
+                  <LabelWithHelp label="MCP Endpoint" help="Streamable HTTP transport 的 MCP endpoint；Web Console 后端会向这里转发 JSON-RPC POST 请求。" />
                   <input value={draft.targetUrl} onChange={(event) => update({targetUrl: event.target.value})} type="text" placeholder="https://mcp.example.com/mcp" />
                 </div>
               </div>
@@ -1368,7 +1473,7 @@ function ConfigPanel({
             <label className="checkbox-row keepalive-row">
               <input type="checkbox" checked={draft.keepAlive} onChange={(event) => update({keepAlive: event.target.checked})} />
               <span>保持连接</span>
-              <small>{draft.transport === 'stdio' ? '开启后切换到其他 MCP 时保留这个本地进程；关闭则切换时主动断开。' : '开启后切换到其他 MCP 时保留当前 HTTP session；关闭则切换时清掉本地会话记录。'}</small>
+              <small>{draft.transport === 'stdio' ? '开启后切换到其他 Server 时保留这个本地进程；关闭则切换时主动断开。' : '开启后切换到其他 Server 时保留当前 MCP session；关闭则切换时清掉本地会话记录。'}</small>
             </label>
           </section>
 
@@ -1379,7 +1484,7 @@ function ConfigPanel({
             </div>
             <div className="config-two-col">
               <div className="field">
-                <LabelWithHelp label="Client Name" help="initialize.clientInfo.name，用来让服务识别当前客户端。" />
+                <LabelWithHelp label="Client Name" help="initialize.clientInfo.name，用来让 MCP Server 识别当前 Client。" />
                 <input value={draft.clientName} onChange={(event) => update({clientName: event.target.value})} type="text" placeholder="mcp-agent-console" />
               </div>
               <div className="field">
@@ -1392,7 +1497,7 @@ function ConfigPanel({
           <section className="config-section">
             <div className="section-kicker">
               <span>请求附加项</span>
-              <small>{draft.transport === 'stdio' ? '默认工具参数会参与表单预填' : 'Headers 只发送给 HTTP MCP 服务'}</small>
+              <small>{draft.transport === 'stdio' ? '默认 Tool 参数会参与表单预填' : 'Headers 只发送给目标 MCP Server'}</small>
             </div>
             {draft.transport === 'proxy' ? (
               <JsonTextEditor
@@ -1401,16 +1506,16 @@ function ConfigPanel({
                 onChange={(value) => update({headersText: value})}
                 validate={(value) => parseJsonObject(value, 'HTTP Headers JSON')}
                 hint="只会发送给目标 MCP 服务，保存位置是当前浏览器 localStorage。"
-                placeholder='{"Authorization":"Bearer ..."}'
+                placeholder={HEADERS_JSON_PLACEHOLDER}
               />
             ) : null}
             <JsonTextEditor
-              label={<LabelWithHelp label="默认工具参数 JSON" help="选择工具时会预填到 arguments，适合放项目、环境、租户等普通参数。" />}
+              label={<LabelWithHelp label="默认 Tool 参数 JSON" help="选择 Tool 时会预填到 arguments，适合放项目、环境、租户等普通参数。" />}
               value={draft.defaultArgsText}
               onChange={(value) => update({defaultArgsText: value})}
-              validate={(value) => parseJsonObject(value, '默认工具参数 JSON')}
-              hint="选择工具时会预填到 arguments，可在调用前继续改。"
-              placeholder='{"requester":"codex"}'
+              validate={(value) => parseJsonObject(value, '默认 Tool 参数 JSON')}
+              hint="选择 Tool 时会预填到 arguments，可在调用前继续改。"
+              placeholder={DEFAULT_ARGS_JSON_PLACEHOLDER}
             />
           </section>
             </div>
@@ -1443,18 +1548,18 @@ function HelpPanel({open, onClose}: {open: boolean; onClose: () => void}) {
           <div>
             <span className="eyebrow">Operator notes</span>
             <h3>快速上手</h3>
-            <p>这张控制台模拟 Agent 接入 MCP 的最短路径。</p>
+            <p>这张控制台模拟 MCP Client 接入 Server 的最短路径。</p>
           </div>
           <button className="icon-btn" type="button" title="关闭帮助" aria-label="关闭帮助" onClick={onClose}>x</button>
         </div>
         <div className="help-steps">
           <article>
             <b>新建配置</b>
-            <p>打开配置管理，选择远端 HTTP 或本地 stdio，填写 endpoint、Header、命令参数和客户端身份。</p>
+            <p>打开配置管理，选择 Streamable HTTP 或 stdio，填写 endpoint、Header、命令参数和 Client 身份。</p>
           </article>
           <article>
             <b>保存到浏览器</b>
-            <p>在配置管理中填写名称、endpoint 和客户端身份，点击保存后会写入当前浏览器 localStorage。</p>
+            <p>在配置管理中填写名称、endpoint 和 Client 身份，点击保存后会写入当前浏览器 localStorage。</p>
           </article>
           <article>
             <b>选择当前配置</b>
@@ -1462,11 +1567,23 @@ function HelpPanel({open, onClose}: {open: boolean; onClose: () => void}) {
           </article>
           <article>
             <b>初始化 MCP</b>
-            <p>首页当前 MCP 连接条中的初始化按钮会执行 initialize 和 tools/list；完成后会清理连接。</p>
+            <p>首页当前 MCP 连接条中的初始化按钮会执行 initialize、initialized notification 和 tools/list；完成后会清理连接。</p>
           </article>
           <article>
             <b>开启调试</b>
-            <p>首页当前 MCP 连接条中的开关控制当前配置开启或关闭；开启后才允许调用协议或工具。</p>
+            <p>首页当前 MCP 连接条中的开关控制当前配置进入 operation phase 或 shutdown；进入 operation phase 后才允许调用协议方法或 Tool。</p>
+          </article>
+          <article>
+            <b>专用 Tools 调试</b>
+            <p>Tools 页支持 tools/list、schema 表单、arguments JSON 和 tools/call，适合测试 Server 暴露的 Tool 能力。</p>
+          </article>
+          <article>
+            <b>协议方法调试</b>
+            <p>Resources、Prompts、Completion、Logging 等能力会按 Server capabilities 显示独立入口；当前可手工编辑 JSON-RPC 调试，暂无专用浏览器。</p>
+          </article>
+          <article>
+            <b>暂不支持的 Client features</b>
+            <p>Roots、Sampling、Elicitation 属于 Server 向 Client 发起的请求；当前控制台不声明这些 Client capabilities，也不实现对应 handler。</p>
           </article>
           <article>
             <b>删除配置</b>
@@ -1474,11 +1591,11 @@ function HelpPanel({open, onClose}: {open: boolean; onClose: () => void}) {
           </article>
           <article>
             <b>刷新页面</b>
-            <p>刷新会丢失页面内存里的 session，已开启配置会回到已关闭；需要重新开启后再调用。</p>
+            <p>刷新会丢失页面内存里的 session，已进入 operation phase 的配置会回到已关闭；需要重新开启后再调用。</p>
           </article>
           <article>
-            <b>本地 stdio 边界</b>
-            <p>本地 stdio 只在 Web Console 本机同源访问时可用；远端部署页面不能启动用户电脑上的本地命令。</p>
+            <b>stdio transport 边界</b>
+            <p>stdio transport 只在 Web Console 本机同源访问时可用；远端部署页面不能启动用户电脑上的本地命令。</p>
           </article>
         </div>
       </section>
@@ -1499,10 +1616,10 @@ function LabelWithHelp({label, help}: {label: string; help: string}) {
 }
 
 function Editor({activeTab, mode, selectedTool, args, setArgs, endpoint}: {activeTab: TabName; mode: Mode; selectedTool: ToolSchema | null; args: JsonObject; setArgs: (args: JsonObject) => void; endpoint: string}) {
-  if (activeTab === 'protocol') {
-    return <JsonEditor label="MCP JSON-RPC 请求" hint={`协议接口会 POST 到 ${endpoint}`} value={args} onChange={setArgs} />;
+  if (activeTab !== 'tools') {
+    return <JsonEditor label="MCP JSON-RPC 请求" hint={`协议方法会通过当前 transport 发送到 ${endpoint}`} value={args} onChange={setArgs} />;
   }
-  if (!selectedTool) return <div className="form"><div className="empty">请选择工具</div></div>;
+  if (!selectedTool) return <div className="form"><div className="empty">请选择 Tool</div></div>;
   if (mode === 'json') return <JsonEditor label="arguments JSON" hint='调用时会包装为 {"method":"tools/call","params":...}' value={args} onChange={setArgs} />;
   return <FormEditor tool={selectedTool} args={args} setArgs={setArgs} />;
 }
@@ -1546,7 +1663,7 @@ function FormEditor({tool, args, setArgs}: {tool: ToolSchema; args: JsonObject; 
   const props = tool.inputSchema?.properties || {};
   const required = new Set(tool.inputSchema?.required || []);
   const names = Object.keys(props);
-  if (!names.length) return <div className="form"><div className="empty">该工具没有参数</div></div>;
+  if (!names.length) return <div className="form"><div className="empty">该 Tool 没有参数</div></div>;
   return (
     <div className="form">
       <ToolSchemaSummary tool={tool} />
@@ -1646,9 +1763,9 @@ function ArrayInput({value, onChange}: {value: JsonValue; onChange: (value: Json
   return (
     <JsonTextEditor
       value={text}
-      placeholder='["value"]'
+      placeholder={ARRAY_VALUE_PLACEHOLDER}
       validate={(next) => parseJsonArray(next, '数组参数')}
-      hint="数组参数会按 JSON 原始类型传给工具。"
+      hint="数组参数会按 JSON 原始类型传给 Tool。"
       minRows={5}
       compact
       onChange={(next) => {
@@ -1669,7 +1786,7 @@ function ObjectInput({value, onChange}: {value: JsonValue; onChange: (value: Jso
   return (
     <JsonTextEditor
       value={text}
-      placeholder='{"key":"value"}'
+      placeholder={OBJECT_VALUE_PLACEHOLDER}
       validate={(next) => parseJsonObject(next, '对象参数')}
       hint="对象参数必须是 JSON object。"
       minRows={5}
@@ -1814,6 +1931,7 @@ function JsonNode({
 }) {
   const expandable = isJsonContainer(value);
   const embeddedJson = typeof value === 'string' ? parseEmbeddedJsonString(value) : null;
+  const embeddedRawText = typeof value === 'string' ? value : '';
   const [open, setOpen] = useState(true);
   useEffect(() => {
     if (expandSignal > 0) setOpen(expandOpen);
@@ -1826,7 +1944,7 @@ function JsonNode({
           <button className="json-toggle" type="button" title={open ? '折叠节点' : '展开节点'} aria-label={open ? '折叠节点' : '展开节点'} onClick={() => setOpen(!open)}>{open ? 'v' : '>'}</button>
           <span className="json-key">{formatJsonKey(name)}</span>
           <span className="json-embedded-label">JSON 字符串</span>
-          {!open ? <JsonPrimitive value={value} /> : null}
+          <span className="json-raw-preview" title={embeddedRawText}>{embeddedJsonPreview(embeddedRawText)}</span>
         </div>
         {open ? (
           <div className="json-children embedded-json-children">
@@ -1883,6 +2001,44 @@ function JsonPrimitive({value}: {value: JsonValue}) {
 function apiUrl(path: string) {
   const fallbackBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:8765' : window.location.origin;
   return fallbackBase.replace(/\/$/, '') + path;
+}
+
+function capabilityTabs(capabilities: JsonObject, methods: ProtocolMethod[], toolsCount: number, toolsCapability: boolean | null): CapabilityTab[] {
+  const tabs: CapabilityTab[] = [
+    {key: 'protocol', label: 'Protocol', title: '查看全部 MCP 协议方法'}
+  ];
+  if (toolsCapability || capabilities.tools) {
+    tabs.push({key: 'tools', label: 'Tools', title: '调试 Server 暴露的 Tools', count: toolsCount});
+  }
+  const entries: {key: TabName; label: string; capability: string | string[]; category: string; title: string}[] = [
+    {key: 'resources', label: 'Resources', capability: 'resources', category: 'resources', title: '调试 Server 暴露的 Resources 协议方法'},
+    {key: 'prompts', label: 'Prompts', capability: 'prompts', category: 'prompts', title: '调试 Server 暴露的 Prompts 协议方法'},
+    {key: 'completion', label: 'Completion', capability: ['completion', 'completions'], category: 'completion', title: '调试 Completion 协议方法'},
+    {key: 'logging', label: 'Logging', capability: 'logging', category: 'logging', title: '调试 Logging 协议方法'}
+  ];
+  for (const entry of entries) {
+    const capabilityNames = Array.isArray(entry.capability) ? entry.capability : [entry.capability];
+    if (!capabilityNames.some((name) => Boolean(capabilities[name]))) continue;
+    tabs.push({
+      key: entry.key,
+      label: entry.label,
+      title: entry.title,
+      count: methods.filter((method) => method.category === entry.category && method.supported).length
+    });
+  }
+  return tabs;
+}
+
+function protocolMethodsForTab(methods: ProtocolMethod[], tab: TabName) {
+  if (tab === 'tools') return [];
+  if (tab === 'protocol') return methods;
+  return methods.filter((method) => method.category === tab);
+}
+
+function tabLabel(tab: TabName) {
+  if (tab === 'protocol') return 'Protocol';
+  if (tab === 'tools') return 'Tools';
+  return CATEGORY_NAMES[tab] || tab;
 }
 
 function canUseLocalStdio() {
@@ -2006,20 +2162,20 @@ function isClientCallable(method: ProtocolMethod) {
 }
 
 function protocolBadgeText(method: ProtocolMethod) {
-  if (method.clientCallable) return '可调用';
+  if (method.clientCallable) return 'Client 可调用';
   if (method.supported) return '已声明';
   return '未声明';
 }
 
 function protocolStatusText(method: ProtocolMethod) {
-  if (method.clientCallable) return '当前连接可调用';
-  if (method.supported) return '当前连接已声明，等待服务端发送';
-  return '当前连接未声明';
+  if (method.clientCallable) return '当前 Client 可主动发起';
+  if (method.supported) return '当前 Server 已声明，等待 Server 发起';
+  return '当前 Server 未声明';
 }
 
 function protocolSupportSource(method: ProtocolMethod, supported: boolean, source: string) {
-  if (!supported) return '当前连接未声明该能力，控制台不会直接调用';
-  if (!isClientCallable(method)) return '当前连接声明了该服务端到客户端的方法；它不是页面可主动发起的调用';
+  if (!supported) return '当前 Server 未声明该 capability，控制台不会直接调用';
+  if (!isClientCallable(method)) return '当前 Server 声明了该 server-to-client 方法；它不是 Client 可主动发起的调用';
   return source;
 }
 
@@ -2187,7 +2343,7 @@ function configProfileId(config: Partial<McpConfig>) {
 function configProfileName(config: Partial<McpConfig>) {
   if (config.transport === 'stdio') {
     const command = String(config.stdioCommand || '').trim();
-    return command ? `stdio: ${command.split('/').pop()}` : '本地 stdio';
+  return command ? `stdio: ${command.split('/').pop()}` : 'stdio transport';
   }
   const endpoint = normalizeEndpoint(String(config.targetUrl || ''));
   if (!endpoint) return '未命名配置';
@@ -2207,7 +2363,7 @@ function formatSavedAt(value: string) {
 }
 
 function transportLabel(config: Pick<McpConfig, 'transport'>) {
-  return config.transport === 'stdio' ? '本地 stdio' : 'HTTP 代理';
+  return config.transport === 'stdio' ? 'stdio transport' : 'Streamable HTTP';
 }
 
 function configToDraft(config: McpConfig | SavedConfigProfile) {
@@ -2237,8 +2393,8 @@ function draftToConfig(draft: ConfigDraft): McpConfig {
   const stdioCommand = draft.stdioCommand.trim();
   const stdioArgs = parseJsonArray(draft.stdioArgsText, 'Arguments JSON').map((item) => String(item));
   const stdioCwd = draft.stdioCwd.trim();
-  if (transport === 'proxy' && !targetUrl) throw new Error('HTTP 代理模式必须填写远端 MCP 地址');
-  if (transport === 'stdio' && !stdioCommand) throw new Error('本地 stdio 模式必须填写 Command');
+  if (transport === 'proxy' && !targetUrl) throw new Error('Streamable HTTP 模式必须填写 MCP endpoint');
+  if (transport === 'stdio' && !stdioCommand) throw new Error('stdio transport 必须填写 Command');
   return {
     transport,
     baseUrl,
@@ -2250,7 +2406,7 @@ function draftToConfig(draft: ConfigDraft): McpConfig {
     clientName: draft.clientName.trim() || 'mcp-agent-console',
     protocolVersion: draft.protocolVersion.trim() || DEFAULT_PROTOCOL_VERSION,
     headers: parseJsonObject(draft.headersText, 'HTTP Headers JSON'),
-    defaultArgs: parseJsonObject(draft.defaultArgsText, '默认工具参数 JSON')
+    defaultArgs: parseJsonObject(draft.defaultArgsText, '默认 Tool 参数 JSON')
   };
 }
 
@@ -2474,13 +2630,27 @@ function parseJsonText(text: string) {
 }
 
 function parseEmbeddedJsonString(value: string) {
-  const trimmed = value.trim();
-  if (!trimmed || !['{', '['].includes(trimmed[0])) return null;
-  try {
-    return JSON.parse(trimmed) as JsonValue;
-  } catch {
-    return null;
+  let current = value.trim();
+  for (let depth = 0; depth < 3; depth += 1) {
+    if (!current) return null;
+    const first = current[0];
+    if (first === '{' || first === '[') {
+      try {
+        return JSON.parse(current) as JsonValue;
+      } catch {
+        return null;
+      }
+    }
+    if (first !== '"') return null;
+    try {
+      const unwrapped = JSON.parse(current) as JsonValue;
+      if (typeof unwrapped !== 'string') return unwrapped;
+      current = unwrapped.trim();
+    } catch {
+      return null;
+    }
   }
+  return null;
 }
 
 function parseJsonObject(text: string, label: string): JsonObject {
@@ -2538,6 +2708,12 @@ function primitiveJsonText(value: JsonValue) {
   return String(value);
 }
 
+function embeddedJsonPreview(value: string) {
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  if (!normalized) return '原始字符串';
+  return normalized.length > 80 ? `${normalized.slice(0, 77)}...` : normalized;
+}
+
 async function copyToClipboard(text: string) {
   try {
     await navigator.clipboard.writeText(text);
@@ -2586,9 +2762,9 @@ function formatConnectionError(error: unknown) {
     text,
     '',
     '排查建议：',
-    '1. 如果是 HTTP MCP，确认远端地址可由 Web Console 后端访问。',
-    '2. 如果是 HTTP MCP，确认鉴权 Header 和 endpoint 路径正确。',
-    '3. 如果目标是 stdio 本地命令 MCP，请确认 Web Console 后端运行在同一台电脑，且 Command / Arguments 正确。',
+    '1. 如果使用 Streamable HTTP transport，确认 MCP endpoint 可由 Web Console 后端访问。',
+    '2. 如果使用 Streamable HTTP transport，确认鉴权 Header 和 endpoint 路径正确。',
+    '3. 如果使用 stdio transport，请确认 Web Console 后端运行在同一台电脑，且 Command / Arguments 正确。',
     '4. 如果 initialize 返回协议错误，检查 Protocol Version 和鉴权 Header。'
   ].join('\n');
 }

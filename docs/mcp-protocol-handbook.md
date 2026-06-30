@@ -468,7 +468,7 @@ Client 必须清楚展示哪个 Server 在请求信息、为什么请求、将�
 
 ## 11. 常见误区
 
-- **把工具接口和协议接口混为一谈**：`tools/list` / `tools/call` 是 MCP 协议方法；某个具体 tool 的 name 和 arguments 是 Server 暴露的业务接口。
+- **把 Tool 和协议方法混为一谈**：`tools/list` / `tools/call` 是 MCP 协议方法；某个具体 Tool 的 name 和 arguments 是 Server 暴露的业务能力。
 - **未 initialize 就调用 tools/list**：违反 lifecycle。先 initialize，收到 response，再发 `notifications/initialized`，然后根据 capabilities 决定能否 list。
 - **假设所有 Server 都有 tools**：错误。Server 可以只有 resources、只有 prompts，甚至只做其他能力。必须看 capabilities。
 - **把 SSE 当成当前独立 transport**：当前标准 transport 是 stdio 与 Streamable HTTP；SSE 是 Streamable HTTP 可选流式机制，也是旧 HTTP+SSE 的兼容路径。
